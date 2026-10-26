@@ -112,8 +112,16 @@ export const reports = new ApiNamespace(scope, 'reports', (context) => ({
 
   The gateway reaches the tasks through an internal Application Load Balancer
   the compute provisions in the app's VPC (with a VPC link), so the same
-  ~29-second cap applies. One load balancer (and one listener) is shared by
-  every container in the backend that hosts a namespace.
+  ~29-second cap applies. Under `apiFrontDoor: 'cloudfront'` and behind
+  `Hosting`, CloudFront routes the namespace's path straight to that load
+  balancer instead (a VPC origin), so a call can run up to 60 seconds. One load
+  balancer (and one listener) is shared by every container in the backend that
+  hosts a namespace.
+
+  Through CloudFront, `ctx.request.url` in a container namespace is the
+  CloudFront (or custom-domain) URL, while a namespace on a Lambda compute
+  reports the gateway's `execute-api` URL, since CloudFront reaches it through
+  the gateway.
 - **Everything else stays on the default compute:** namespaces without a
   `compute`, `RawRoute`s, and the auth routes.
 

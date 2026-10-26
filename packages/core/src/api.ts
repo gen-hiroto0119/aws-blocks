@@ -132,7 +132,9 @@ export interface ApiNamespaceOptions {
    *
    * The gateway reaches the container's tasks through an internal load balancer
    * the compute provisions in the app's VPC; the same ~29-second cap applies.
-   * `RawRoute`s always run on the default compute.
+   * Under `apiFrontDoor: 'cloudfront'` and behind `Hosting`, CloudFront routes the
+   * namespace's path straight to that load balancer instead, so a call can run up
+   * to 60 seconds. `RawRoute`s always run on the default compute.
    *
    * Typed structurally — anything whose `resolve()` yields a compute, which is
    * what a `Compute` block is — so this entry carries no CDK types.

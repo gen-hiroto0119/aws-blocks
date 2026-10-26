@@ -89,7 +89,22 @@ with readiness on port **8081** (503 while draining).
   `x-blocks-forwarded-stage`, from its request context, overwriting any client
   value), and the container builds `ctx.request.url` from them: the same URL
   the Lambda handler reports.
-- **Limits.** API calls keep the gateway's ~29-second integration timeout.
+- **CloudFront front doors.** Under `apiFrontDoor: 'cloudfront'` and behind
+  `Hosting`, the distribution routes each container namespace's exact path
+  (`/aws-blocks/api/{name}`) straight to the load balancer's shared listener
+  through one CloudFront VPC origin per backend (60 s read timeout), ahead of
+  the `/aws-blocks/api/*` gateway behavior; the listener's path rule picks the
+  compute. CloudFront forwards the viewer's `Host` to a VPC origin with the
+  origin port appended (`<domain>:10000`), so a viewer-request CloudFront
+  Function stamps the bare viewer host as `x-blocks-forwarded-host` and drops
+  `x-blocks-forwarded-stage`, overwriting client values: `ctx.request.url` is
+  the public URL, custom domain included. (A namespace on a Lambda compute, which
+  CloudFront reaches through the gateway, reports the gateway's `execute-api`
+  URL instead.) The load balancer admits CloudFront's origin-facing prefix list
+  on the listener range in one rule — the prefix list is looked up at deploy
+  time (a custom resource) because its id differs per region.
+- **Limits.** Through the gateway, API calls keep its ~29-second integration
+  timeout; through a CloudFront VPC origin, up to 60 seconds.
 
 ## Autoscaling
 
