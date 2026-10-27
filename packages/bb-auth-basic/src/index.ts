@@ -567,11 +567,18 @@ export class AuthBasic extends Scope implements BlocksAuth {
 	/**
 	 * Complete a password reset with the verification code.
 	 *
+	 * On success this ALSO invalidates every outstanding session for the user
+	 * (by bumping their session epoch), so a token stolen before the reset can no
+	 * longer authenticate — password reset is the primary remediation for a
+	 * compromised account. Subsequent requests carrying a pre-reset cookie fail
+	 * with {@link AuthBasicErrors.SessionRevoked}.
+	 *
 	 * @param username - The username.
 	 * @param code - The 6-digit verification code.
 	 * @param newPassword - The new password (must satisfy password policy).
 	 * @throws {AuthBasicErrors.InvalidCode} If the code is invalid or expired.
 	 * @throws {AuthBasicErrors.InvalidPassword} If the new password does not satisfy the password policy.
+	 * @throws {AuthBasicErrors.SignOutIncomplete} If the password was changed but outstanding sessions could not be invalidated (retryable).
 	 */
 	async confirmResetPassword(username: string, code: string, newPassword: string): Promise<void> {
 		await this.verifyCode('reset', username, code);
@@ -580,15 +587,28 @@ export class AuthBasic extends Scope implements BlocksAuth {
 		if (!record) throw new ApiError('Invalid or expired code', 400, { name: AuthBasicErrors.InvalidCode });
 		record.hash = await bcrypt.hash(newPassword, BCRYPT_COST);
 		await this.users.put(username, JSON.stringify(record));
+		// Invalidate every outstanding session for this user: a password reset is
+		// the primary remediation for account compromise, so a stolen pre-reset
+		// token must not survive it. Bumping the epoch rejects all tokens issued
+		// before now (see `resolveSession`). Done AFTER the password write so a
+		// failed hash/store leaves both the credential and the epoch untouched.
+		await this.bumpSessionEpoch(username);
 	}
 
 	// ── Cookie management ────────────────────────────────────────────────
 
 	private async setCookie(context: BlocksContext, username: string): Promise<void> {
 		const secret = await this.getSecret();
+		// Stamp the user's current session epoch into the token (`ep` claim). A
+		// password reset bumps the stored epoch (see `bumpSessionEpoch`), and
+		// `resolveSession` rejects any token whose `ep` is older than the stored
+		// value — this is how "revoke ALL outstanding sessions" works without
+		// knowing each session's `jti` (the per-`jti` list only covers the one
+		// signing-out token).
+		const epoch = await this.readSessionEpoch(username);
 		// `jwtid` stamps a unique `jti` claim on the token so sign-out can revoke
 		// this specific session server-side (see `signOut` / `isRevoked`).
-		const token = jwt.sign({ username }, secret, {
+		const token = jwt.sign({ username, ep: epoch }, secret, {
 			expiresIn: this.sessionDuration,
 			issuer: `bb-auth-basic:${this.fullId}`,
 			subject: username,
@@ -637,7 +657,7 @@ export class AuthBasic extends Scope implements BlocksAuth {
 	 */
 	private async parseSessionToken(
 		context: BlocksContext,
-	): Promise<{ username: string; jti?: string; exp: number } | null> {
+	): Promise<{ username: string; jti?: string; exp: number; ep: number } | null> {
 		const secret = await this.getSecret();
 		const cookieName = `auth_${this.fullId}`;
 		const cookies = context.request.headers.get('cookie') || '';
@@ -647,9 +667,12 @@ export class AuthBasic extends Scope implements BlocksAuth {
 			const payload = jwt.verify(match[1], secret, {
 				algorithms: ['HS256'],
 				issuer: `bb-auth-basic:${this.fullId}`,
-			}) as { username: string; jti?: string; exp?: number };
+			}) as { username: string; jti?: string; exp?: number; ep?: number };
 			if (typeof payload.exp !== 'number') return null;
-			return { username: payload.username, jti: payload.jti, exp: payload.exp };
+			// A token issued before the `ep` claim existed (or any token without it)
+			// is treated as epoch 0, so the first password-reset bump (to >= 1)
+			// invalidates it just like any other stale-epoch token.
+			return { username: payload.username, jti: payload.jti, exp: payload.exp, ep: payload.ep ?? 0 };
 		} catch {
 			return null;
 		}
@@ -667,16 +690,22 @@ export class AuthBasic extends Scope implements BlocksAuth {
 	): Promise<{ user: AuthBasicUser } | { user: null; reason: 'absent' | 'revoked' }> {
 		const payload = await this.parseSessionToken(context);
 		if (!payload) return { user: null, reason: 'absent' };
-		// The revocation check and the user-record lookup don't depend on each
-		// other, so run them concurrently — an authenticated request stays at a
-		// single round trip rather than two sequential reads.
-		const [revoked, record] = await Promise.all([
+		// The revocation check, the epoch read, and the user-record lookup don't
+		// depend on each other, so run them concurrently — an authenticated
+		// request stays at a single round trip rather than three sequential reads.
+		const [revoked, currentEpoch, record] = await Promise.all([
 			payload.jti ? this.isRevoked(payload.jti) : false,
+			this.readSessionEpoch(payload.username),
 			this.getUserRecord(payload.username),
 		]);
 		// A token whose jti was revoked at sign-out is rejected even though it
 		// is still cryptographically valid and unexpired.
 		if (revoked) return { user: null, reason: 'revoked' };
+		// A token issued before the user's current session epoch is rejected: a
+		// password reset bumps the epoch, so every session that predates the
+		// reset is invalidated at once. Reported as `revoked` — semantically the
+		// reset revoked it.
+		if (payload.ep < currentEpoch) return { user: null, reason: 'revoked' };
 		if (!record || record.unconfirmed) return { user: null, reason: 'absent' };
 		return { user: this.toAuthBasicUser(payload.username, record) };
 	}
@@ -734,6 +763,60 @@ export class AuthBasic extends Scope implements BlocksAuth {
 	 */
 	private async isRevoked(jti: string): Promise<boolean> {
 		return (await this.codes.get(this.revokedKey(jti))) === REVOKED_MARKER;
+	}
+
+	/** Session-epoch key for a username. Stored in the shared `codes` store. */
+	private epochKey(username: string): string {
+		return `epoch:${username}`;
+	}
+
+	/**
+	 * The user's current session epoch — a monotonically increasing integer
+	 * bumped on password reset (`confirmResetPassword`). Absent (never bumped)
+	 * reads as 0.
+	 *
+	 * Unlike the `revoked:<jti>` markers, the epoch marker carries NO TTL: it
+	 * must outlive every outstanding token so a pre-change token can still be
+	 * recognized as stale. It is one small integer per user that has ever reset
+	 * a credential, so it never grows unbounded.
+	 */
+	private async readSessionEpoch(username: string): Promise<number> {
+		const raw = await this.codes.get(this.epochKey(username));
+		if (!raw) return 0;
+		const n = Number.parseInt(raw, 10);
+		// A corrupt/non-numeric marker is treated as 0 rather than NaN (which
+		// would make every `ep < NaN` comparison false and silently disable the
+		// check). 0 keeps existing tokens valid; the next bump re-establishes it.
+		return Number.isSafeInteger(n) && n >= 0 ? n : 0;
+	}
+
+	/**
+	 * Bump the user's session epoch, invalidating every token issued before now.
+	 * Called on password reset (`confirmResetPassword`). A plain read-modify-write is
+	 * sound here (no compare-and-swap needed): invalidation only requires that
+	 * the stored epoch end up STRICTLY GREATER than every already-issued token's
+	 * `ep`, and concurrent bumps all read a value >= each live token's `ep` and
+	 * write back at least that + 1. A lost increment merely means two concurrent
+	 * resets land on the same new epoch instead of two distinct ones — the exact
+	 * value is immaterial, only that it exceeds every outstanding token's `ep`.
+	 * (Contrast the verification-code attempt cap, which DOES use a CAS reserve
+	 * because there the exact count is the security bound.) The write is
+	 * security-relevant, so a failure throws a branded error rather than silently
+	 * leaving old sessions alive.
+	 */
+	private async bumpSessionEpoch(username: string): Promise<void> {
+		const current = await this.readSessionEpoch(username);
+		try {
+			await this.codes.put(this.epochKey(username), String(current + 1));
+		} catch (e) {
+			this.log.error('AuthBasic: failed to bump session epoch on password reset', { error: e });
+			// The name is deliberately shared with signOut's revocation-write
+			// failure: both mean "a security-relevant session invalidation did not
+			// persist; retry", so callers handle one error for either path.
+			throw new ApiError('Password was reset but outstanding sessions could not be invalidated; please retry', 503, {
+				name: AuthBasicErrors.SignOutIncomplete,
+			});
+		}
 	}
 
 	// ── Sign-in throttling / account lockout ─────────────────────────────

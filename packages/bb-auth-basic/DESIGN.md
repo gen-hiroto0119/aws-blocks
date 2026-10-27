@@ -18,7 +18,7 @@ AuthBasic provides simple username/password authentication built on KVStore and 
 ```
 AuthBasic (extends Scope, implements BlocksAuth)
     ├── KVStore (users) — stores UserRecord { hash, createdAt, unconfirmed? }
-    ├── KVStore (codes) — HMAC-hashed verification codes + expiry, `revoked:<jti>` sign-out markers, and `lockout:<username>` sign-in throttle counters
+    ├── KVStore (codes) — HMAC-hashed verification codes + expiry, `revoked:<jti>` sign-out markers, `epoch:<username>` session-invalidation counters, and `lockout:<username>` sign-in throttle counters
     ├── AppSetting (jwt-secret) — SSM SecureString for JWT signing key
     └── Logger (optional) — error-level by default
 
@@ -96,6 +96,7 @@ This allows the Authenticator UI component to display errors without losing trac
 - **Shared secret** — AppSetting ensures all Lambda instances use the same signing key, so tokens are valid across cold starts.
 - **Security** — secret is stored in SSM SecureString (encrypted at rest); never exposed in code or environment variables.
 - **Revocable on sign-out** — `signOut` records the presented token's `jti` on a revocation list (the `codes` store, keyed `revoked:<jti>`), with an expiry equal to the token's own `exp` so the list self-trims. `getUserFromCookie` rejects a revoked `jti`, so a copied or replayed cookie no longer authenticates after sign-out. This trades pure in-memory validation for one KVStore read per request. `requireAuth` reports a revoked session as `SessionRevokedException` and an absent/aged-out one as `SessionExpiredException`, so a client can message "you signed out / your session was revoked" differently from "your token expired"; the session is resolved in a single pass that carries the reason, so classifying the failure costs no extra verify or read. The revocation-list read is an eventually-consistent DynamoDB `GetItem` (no `ConsistentRead`, the same as every other KVStore read), so revocation is near-immediate rather than instantaneous: immediately after `signOut` writes the marker, a token replayed against a different Lambda instance may still authenticate for the sub-second propagation window before the write is visible everywhere. For richer session management (refresh tokens, device management), use AuthCognito.
+- **Invalidated on password reset** — beyond the per-`jti` sign-out above, a password reset invalidates **every** session issued before it, via a per-user **session epoch** stamped into each token (`ep` claim) and bumped on `confirmResetPassword` (see D-AB-12). `resolveSession` reads the stored epoch in the same concurrent batch as the `jti` revocation check (no extra round trip) and rejects any token whose `ep` predates it, again as `SessionRevokedException`. This is what makes a stolen pre-reset token stop working — sign-out only revokes the one token that signs out, whereas the epoch bump is set-wide.
 
 ### D-AB-3: bcrypt for password hashing (cost factor 12)
 
@@ -189,6 +190,19 @@ This allows the Authenticator UI component to display errors without losing trac
 
 **Not** a replacement for infrastructure-layer rate limiting (CloudFront WAF, API Gateway throttling), which still belongs in front of the API for volumetric/DDoS protection. This is per-account credential-guess protection, complementary to the network layer.
 
+### D-AB-12: Invalidate all outstanding sessions on password reset (per-user session epoch)
+
+**Decision:** On `confirmResetPassword`, AuthBasic invalidates **every** session issued before the reset, not just the one token presenting the reset. Each user has a **session epoch** — a monotonically increasing integer stored in the shared `codes` store under `epoch:<username>` (absent = `0`). `setCookie` stamps the user's current epoch into the JWT as an `ep` claim; `confirmResetPassword` bumps the stored epoch after the new password is written; and `resolveSession` rejects any token whose `ep` is less than the stored epoch, reported as `SessionRevokedException`. The epoch read is folded into the same concurrent `Promise.all` as the existing `jti` revocation check and the user-record lookup, so an authenticated request stays at a single round trip.
+
+**Rationale:**
+- **A password reset is the compromise remedy, so stale sessions must die.** The whole point of resetting a password is to lock out whoever had the old credential — a token stolen before the reset must stop authenticating. Per-`jti` sign-out revocation (D-AB's revocation list) only covers the one token that signs out; it cannot revoke sessions the attacker holds. The epoch bump invalidates *all* pre-reset sessions at once with a single write.
+- **Epoch, not a per-session list.** Revoking "every outstanding session" by `jti` would require enumerating and marking every live token for the user — AuthBasic doesn't track issued tokens. A single per-user counter stamped into the token and compared at verification achieves set-wide invalidation in O(1) storage and one read.
+- **The epoch marker carries no TTL.** Unlike `revoked:<jti>` markers (which self-trim at the token's `exp`), the epoch must outlive every outstanding token — a token issued at epoch N must still be recognizable as stale after the bump to N+1 for the token's whole lifetime. It is one small integer per user who has ever reset a credential, so it never grows unbounded; it is not reaped.
+- **Plain read-modify-write is sound here (no CAS needed).** Invalidation only requires the stored epoch to end up strictly greater than every already-issued token's `ep`. Concurrent bumps all read a value ≥ each live token's `ep` and write back ≥ that + 1, so a lost increment merely collapses two concurrent resets onto the same new epoch — the exact value is immaterial, only that it exceeds every outstanding token's `ep`. This is a genuinely different case from the verification-code attempt cap (D-AB-4), where the exact count *is* the security bound and a compare-and-swap reserve is therefore required.
+- **A sign-in racing a reset mints a token at the stale epoch — a fail-safe, not a gap.** `setCookie` reads the epoch and `confirmResetPassword` bumps it, so if a sign-in reads epoch `N` and a concurrent reset bumps to `N+1` *after* that read, the new token is minted with `ep = N` and is rejected on its next request. This is a harmless false-invalidation that simply forces a re-login (the race errs *toward* invalidation, never letting a pre-reset token survive), and it is acceptable because completing a sign-in requires the current password anyway — whoever won the race already holds the live credential.
+- **A failed bump throws, it does not log-and-continue.** The epoch write is security-relevant: silently leaving pre-reset sessions alive after a reset would defeat the feature. A write failure throws a branded `SignOutIncompleteException` (503, retriable, generic message with no SDK metadata) after the password has been changed — the credential is updated, but the caller is told the old sessions could not be invalidated and should retry. This mirrors how `signOut` treats a failed revocation-list write, and the error name is shared with it deliberately: both mean "a security-relevant session invalidation did not persist; retry", so callers handle one error for either path.
+- **Backward compatible with pre-feature tokens.** A token issued before this feature has no `ep` claim; `parseSessionToken` reads a missing claim as `0`, so the first password-reset bump (to ≥ 1) invalidates it like any other stale-epoch token. A corrupt/non-numeric stored epoch reads as `0` (fail-open to "valid") rather than `NaN` (which would make every `ep < NaN` comparison false and silently disable the check); the next bump re-establishes it.
+
 ## Infrastructure (CDK)
 
 None directly — AuthBasic is a composite Building Block with no CDK construct. All infrastructure is created by composed Building Blocks:
@@ -248,6 +262,12 @@ The mock behavior is identical to AWS behavior with the following environment di
 
 Legacy code rows written before attempt-limiting have no `attempts` field and default to `0` on read.
 
+**Session epoch** (stored as a decimal integer string in KVStore, keyed `epoch:<username>`):
+```
+"3"   // the user's current session epoch; absent = 0 (never reset a credential)
+```
+Bumped on password reset (`confirmResetPassword`) — the only operation that bumps it; any future credential-mutating entry point must bump it too. Written with **no TTL** so it outlives every outstanding token. A token's `ep` claim less than this value is rejected as revoked. A corrupt/non-numeric value reads as `0`.
+
 **Legacy user record handling:** If a raw value is stored (starts with a non-`{` character), it's treated as a bare bcrypt hash with epoch creation date. This supports migration from an earlier format.
 
 ## Mock vs AWS Behavior Differences
@@ -283,6 +303,7 @@ Legacy code rows written before attempt-limiting have no `attempts` field and de
 | Token theft (XSS) | HttpOnly cookies — not accessible via JavaScript |
 | Token theft (network) | Secure flag — only sent over HTTPS |
 | Token replay after sign-out | Revocation list keyed by `jti` — `signOut` records the token id (self-expiring at the token's `exp`), and every auth check rejects a revoked `jti`, so a copied/replayed cookie stops working at sign-out rather than at `exp` |
+| Stolen token surviving a password reset | Per-user session epoch (D-AB-12) — `confirmResetPassword` bumps `epoch:<username>`, and every auth check rejects a token whose `ep` claim predates it, so a credential reset invalidates **all** sessions issued before it (not just the one that signs out) |
 | Timing attacks on code verification | `constantTimeEquals` for HMAC comparison |
 | User enumeration (resetPassword) | Silent success for non-existent users |
 | Code brute-force | `MAX_CODE_ATTEMPTS` (5) failed-guess cap, enforced atomically (each attempt reserved by a compare-and-swap, so parallel bursts can't bypass it), plus the 10-minute TTL (D-AB-4). The cap bounds guesses against a *single* code; issuance is unthrottled, so the overall bound is `cap × issuances ÷ keyspace` — rate-limit issuance volume at the infrastructure layer (WAF / API Gateway) |
