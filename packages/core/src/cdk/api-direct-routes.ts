@@ -60,12 +60,15 @@ const CLOUDFRONT_ADMITTED: unique symbol = Symbol.for('blocks:CloudFrontVpcOrigi
  *
  * @param behaviorOptions the options of the distribution's other API behaviors
  *   (caching off, all methods, viewer headers forwarded except `Host`)
+ * @param originHeaders headers each VPC origin adds to every request (the
+ *   `apiWaf` front-door marker; see `attachApiWafToLoadBalancers`)
  * @internal
  */
 export function addDirectApiBehaviors(
 	distribution: cloudfront.Distribution,
 	routes: readonly ApiDirectRoute[],
 	behaviorOptions: cloudfront.AddBehaviorOptions,
+	originHeaders?: Readonly<Record<string, string>>,
 ): void {
 	if (routes.length === 0) return;
 	const forwardedHost = new cloudfront.Function(distribution, 'ApiForwardedHost', {
@@ -84,6 +87,7 @@ export function addDirectApiBehaviors(
 				httpPort: ingress.port,
 				protocolPolicy: cloudfront.OriginProtocolPolicy.HTTP_ONLY,
 				readTimeout: DIRECT_ORIGIN_READ_TIMEOUT,
+				...(originHeaders ? { customHeaders: { ...originHeaders } } : {}),
 			});
 			originsByListener.set(key, origin);
 		}
@@ -92,6 +96,21 @@ export function addDirectApiBehaviors(
 			functionAssociations: [{ function: forwardedHost, eventType: cloudfront.FunctionEventType.VIEWER_REQUEST }],
 		});
 	}
+}
+
+/**
+ * The load balancers among `routes` that a CloudFront distribution routes to
+ * directly (see {@link addDirectApiBehaviors}), each once.
+ *
+ * @internal
+ */
+export function directlyRoutedLoadBalancers(routes: readonly ApiDirectRoute[]): elbv2.IApplicationLoadBalancer[] {
+	const loadBalancers = new Set<elbv2.IApplicationLoadBalancer>();
+	for (const { ingress } of routes) {
+		const marked = ingress.loadBalancer as unknown as Record<symbol, boolean | undefined>;
+		if (marked[CLOUDFRONT_ADMITTED]) loadBalancers.add(ingress.loadBalancer);
+	}
+	return [...loadBalancers];
 }
 
 /**

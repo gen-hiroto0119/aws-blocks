@@ -589,7 +589,7 @@ class StubLoadBalancedCompute extends StubCompute {
 }
 
 describe('createSharedGateway — load-balanced computes', () => {
-	function loadBalanced() {
+	function loadBalanced(loadBalancerRequestHeaders?: Record<string, string>) {
 		const { stack, compute } = setup('LoadBalancedStack');
 		const vpc = new ec2.Vpc(stack, 'Vpc', { maxAzs: 2, natGateways: 0 });
 		const subnets = { subnetType: ec2.SubnetType.PRIVATE_ISOLATED };
@@ -612,6 +612,7 @@ describe('createSharedGateway — load-balanced computes', () => {
 				[render, ['render', 'preview']],
 				[batch, ['batch']],
 			]),
+			loadBalancerRequestHeaders,
 		});
 		const template = Template.fromStack(stack);
 		return { template, routed, resources: template.toJSON().Resources as Record<string, { Type: string; Properties: any }> };
@@ -640,6 +641,19 @@ describe('createSharedGateway — load-balanced computes', () => {
 		assert.match(byPath.render, /:10000\/aws-blocks\/api\/render"/);
 		assert.match(byPath.preview, /:10000\/aws-blocks\/api\/preview"/);
 		assert.match(byPath.batch, /:10000\/aws-blocks\/api\/batch"/);
+	});
+
+	test('each VPC link integration adds the given request headers as fixed values', () => {
+		const vpcLinkParams = (resources: Record<string, { Type: string; Properties: any }>) =>
+			Object.values(resources)
+				.filter((r) => r.Type === 'AWS::ApiGateway::Method' && r.Properties.Integration?.ConnectionType === 'VPC_LINK')
+				.map((m) => m.Properties.Integration.RequestParameters);
+		for (const params of vpcLinkParams(loadBalanced({ 'x-blocks-front-door': 'marker' }).resources)) {
+			assert.strictEqual(params['integration.request.header.x-blocks-front-door'], "'marker'");
+		}
+		for (const params of vpcLinkParams(loadBalanced().resources)) {
+			assert.ok(!('integration.request.header.x-blocks-front-door' in params));
+		}
 	});
 
 	test('each VPC link integration carries the 29s integration timeout', () => {

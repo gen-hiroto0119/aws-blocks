@@ -18,6 +18,7 @@ import { type ResolvedApiWaf, resolveApiWaf } from './api-waf.js';
 import {
 	type ApiFrontDoorOwner,
 	apiFrontDoorMarker,
+	apiWafMarker,
 	claimApiFrontDoor,
 	publishPublicOrigin,
 	publicApiUrl,
@@ -338,6 +339,7 @@ export function buildSharedGateway(owner: SharedGatewayOwner, backendModule: obj
 		defaultCompute,
 		defaults: owner.defaults,
 		regionalEndpoint: cloudfront,
+		loadBalancerRequestHeaders: apiWafMarker(owner),
 	});
 	owner._sharedGateway = sharedGateway;
 	owner._apiDirectRoutes = sharedGateway.directRoutes;

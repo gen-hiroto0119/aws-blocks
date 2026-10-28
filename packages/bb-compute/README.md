@@ -112,8 +112,9 @@ export const reports = new ApiNamespace(scope, 'reports', (context) => ({
 
   The gateway reaches the tasks through an internal Application Load Balancer
   the compute provisions in the app's VPC (with a VPC link), so the same
-  ~29-second cap applies. Under `apiFrontDoor: 'cloudfront'` and behind
-  `Hosting`, CloudFront routes the namespace's path straight to that load
+  ~29-second cap applies. Under `apiFrontDoor: 'cloudfront'`, and behind
+  `Hosting`'s CloudFront door on either tier, CloudFront routes the namespace's
+  path straight to that load
   balancer instead (a VPC origin), so a call can run up to 60 seconds. One load
   balancer (and one listener) is shared by every container in the backend that
   hosts a namespace.

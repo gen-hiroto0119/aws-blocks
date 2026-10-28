@@ -54,7 +54,8 @@ function apiVpcLink(scope: Construct, ingress: LoadBalancerIngress): ApiVpcLink 
 /**
  * Add an `ANY` method on `resource` that proxies to a load-balanced compute's
  * HTTP server at `path`, through the backend's VPC link, cut off after `timeout`
- * (the shared gateway's integration timeout).
+ * (the shared gateway's integration timeout). `requestHeaders` are added to
+ * every request, as fixed values.
  *
  * The request reaches the container with the load balancer's host and no stage,
  * so the integration stamps the gateway's public host and stage on it
@@ -69,6 +70,7 @@ export function addLoadBalancerMethod(
 	ingress: LoadBalancerIngress,
 	path: string,
 	timeout: cdk.Duration,
+	requestHeaders: Readonly<Record<string, string>> = {},
 ): apigateway.Method {
 	const { vpcLink, securityGroup } = apiVpcLink(resource, ingress);
 	ingress.loadBalancer.connections.allowFrom(
@@ -87,6 +89,9 @@ export function addLoadBalancerMethod(
 			requestParameters: {
 				[`integration.request.header.${FORWARDED_HOST_HEADER}`]: 'context.domainName',
 				[`integration.request.header.${FORWARDED_STAGE_HEADER}`]: 'context.stage',
+				...Object.fromEntries(
+					Object.entries(requestHeaders).map(([name, value]) => [`integration.request.header.${name}`, `'${value}'`]),
+				),
 			},
 		},
 	});

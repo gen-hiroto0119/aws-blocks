@@ -607,6 +607,26 @@ describe('ApiNamespace on a container compute', () => {
 		});
 	});
 
+	test('with apiWaf, the VPC link also stamps the front-door marker; the web ACL stays on the stage alone', async () => {
+		const stack = await BlocksStack.create(new cdk.App(), 'ContainerApiWafStack', {
+			backendHandlerPath: handlerPath,
+			backendCDKPath: containerBackendPath,
+			defaults: BlocksPresets.production,
+			apiWaf: { enabled: true },
+		});
+		const wafResources = Template.fromStack(stack).toJSON().Resources as Resources;
+		const vpcLinkMethods = ofType(wafResources, 'AWS::ApiGateway::Method').filter(
+			([, m]) => m.Properties.Integration?.ConnectionType === 'VPC_LINK',
+		);
+		assert.ok(vpcLinkMethods.length > 0);
+		for (const [, m] of vpcLinkMethods) {
+			const marker = m.Properties.Integration.RequestParameters['integration.request.header.x-blocks-front-door'];
+			assert.ok(JSON.stringify(marker).includes('AWS::StackId'), `the stack-id marker, got ${JSON.stringify(marker)}`);
+		}
+		// No Hosting routes to the load balancer directly, so only the stage is associated.
+		assert.strictEqual(ofType(wafResources, 'AWS::WAFv2::WebACLAssociation').length, 1);
+	});
+
 	test('the API port is open to the load balancer only, on a security group of its own', () => {
 		const [lbId, lb] = one(resources, 'AWS::ElasticLoadBalancingV2::LoadBalancer');
 		const lbSg = lb.Properties.SecurityGroups[0]['Fn::GetAtt'][0];

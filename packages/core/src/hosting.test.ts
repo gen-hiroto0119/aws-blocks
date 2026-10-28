@@ -696,6 +696,99 @@ describe('Hosting', () => {
       assert.strictEqual(Annotations.fromStack(stack).findWarning('*', Match.stringLikeRegexp('apiWaf')).length, 0);
     });
 
+    // A container namespace's direct route, as the shared gateway records it.
+    function directRoute(stack: Stack & ApiFrontDoorOwner) {
+      const vpc = new ec2.Vpc(stack, 'Vpc', { maxAzs: 2, natGateways: 0 });
+      const subnets = { subnetType: ec2.SubnetType.PRIVATE_ISOLATED };
+      const loadBalancer = new elbv2.ApplicationLoadBalancer(stack, 'Alb', { vpc, vpcSubnets: subnets });
+      const routes = [
+        {
+          path: `${BLOCKS_RPC_PREFIX}/render`,
+          ingress: { kind: 'load-balancer' as const, loadBalancer, port: 10_000, vpc, subnets, routePath: () => {} },
+        },
+      ];
+      stack._apiDirectRoutes = routes;
+      return { loadBalancer, routes };
+    }
+
+    function wafAssociations(template: Template) {
+      return Object.values(template.findResources('AWS::WAFv2::WebACLAssociation')).map((a) => a.Properties);
+    }
+
+    function vpcOriginHeaders(template: Template) {
+      const distConfig = Object.values(template.findResources('AWS::CloudFront::Distribution'))[0].Properties.DistributionConfig;
+      const origin = (distConfig.Origins as Array<{ VpcOriginConfig?: unknown; OriginCustomHeaders?: Array<{ HeaderName: string; HeaderValue: unknown }> }>)
+        .find((o) => o.VpcOriginConfig);
+      assert.ok(origin, 'a VPC origin');
+      return origin.OriginCustomHeaders ?? [];
+    }
+
+    it('default apigateway tier + CloudFront Hosting + a container namespace: the stage ACL also guards its load balancer', () => {
+      createSpaBuildOutput(tmpDir);
+      const { stack, api, stage } = wafOwner('ApiWafDirectRoute');
+      const { loadBalancer, routes } = directRoute(stack);
+      scheduleApiFrontDoor(stack, false, api.apiUrl, stage);
+      new Hosting(stack, 'Hosting', { root: tmpDir, api: { ...api, _apiDirectRoutes: routes } });
+
+      const template = Template.fromStack(stack);
+      const [aclId] = Object.keys(template.findResources('AWS::WAFv2::WebACL'));
+      const associations = wafAssociations(template);
+      assert.strictEqual(associations.length, 2, 'the stage and the load balancer');
+      for (const a of associations) assert.deepStrictEqual(a.WebACLArn, { 'Fn::GetAtt': [aclId, 'Arn'] });
+      assert.ok(
+        associations.some((a) => JSON.stringify(a.ResourceArn) === JSON.stringify(stack.resolve(loadBalancer.loadBalancerArn))),
+        'associated with the container load balancer',
+      );
+      // The direct route carries the marker, so the rate rule exempts its edge-IP requests.
+      const marker = stack.resolve(apiFrontDoorMarkerValue(stack));
+      assert.ok(
+        vpcOriginHeaders(template).some(
+          (h) => h.HeaderName === API_FRONT_DOOR_MARKER_HEADER && JSON.stringify(h.HeaderValue) === JSON.stringify(marker),
+        ),
+        'the VPC origin forwards the marker header',
+      );
+      assert.strictEqual(Annotations.fromStack(stack).findWarning('*', Match.stringLikeRegexp('apiWaf')).length, 0);
+    });
+
+    it('default apigateway tier + a container namespace, no Hosting: only the stage carries the ACL', () => {
+      const { stack, api, stage } = wafOwner('ApiWafNoDirectRoute');
+      directRoute(stack);
+      scheduleApiFrontDoor(stack, false, api.apiUrl, stage);
+
+      // Without a CloudFront door, the load balancer is reached only through the stage.
+      assert.strictEqual(wafAssociations(Template.fromStack(stack)).length, 1);
+    });
+
+    it('default apigateway tier + a caller-supplied ACL: associated with the load balancer as-is, with a warning', () => {
+      createSpaBuildOutput(tmpDir);
+      const { stack, api, stage } = wafOwner('ApiWafOwnAclDirectRoute', { account: '111111111111', region: 'us-east-1' });
+      const webAclArn = 'arn:aws:wafv2:us-east-1:111111111111:regional/webacl/mine/0000';
+      stack._apiWaf = { webAclArn };
+      const { routes } = directRoute(stack);
+      scheduleApiFrontDoor(stack, false, api.apiUrl, stage);
+      new Hosting(stack, 'Hosting', { root: tmpDir, api: { ...api, _apiDirectRoutes: routes } });
+
+      const template = Template.fromStack(stack);
+      const associations = wafAssociations(template);
+      assert.strictEqual(associations.length, 2);
+      for (const a of associations) assert.strictEqual(a.WebACLArn, webAclArn);
+      assert.deepStrictEqual(vpcOriginHeaders(template), [], 'no marker for a caller-supplied ACL');
+      const warnings = Annotations.fromStack(stack).findWarning('*', Match.stringLikeRegexp('also associated with the container load balancer'));
+      assert.strictEqual(warnings.length, 1);
+    });
+
+    it("cloudfront tier: the distribution's ACL covers the direct route; no load balancer association", () => {
+      const { stack, api } = wafOwner('ApiWafCloudFrontDirectRoute', { account: '111111111111', region: 'us-east-1' });
+      directRoute(stack);
+      scheduleApiFrontDoor(stack, true, api.apiUrl);
+
+      const template = Template.fromStack(stack);
+      assert.strictEqual(wafAssociations(template).length, 0);
+      template.resourceCountIs('AWS::CloudFront::VpcOrigin', 1);
+      const distConfig = Object.values(template.findResources('AWS::CloudFront::Distribution'))[0].Properties.DistributionConfig;
+      assert.ok(distConfig.WebACLId, 'the distribution carries the web ACL');
+    });
+
     it('default apigateway tier + a non-claiming door: stage ACL without the rate rule, and a warning', () => {
       createSpaBuildOutput(tmpDir);
       const { stack, api, stage } = wafOwner('ApiWafProxyDoor', { account: '111111111111', region: 'us-east-1' });

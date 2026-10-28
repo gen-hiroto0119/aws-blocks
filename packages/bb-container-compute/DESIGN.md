@@ -90,7 +90,8 @@ with readiness on port **8081** (503 while draining).
   value), and the container builds `ctx.request.url` from them: the same URL
   the Lambda handler reports.
 - **CloudFront front doors.** Under `apiFrontDoor: 'cloudfront'` and behind
-  `Hosting`, the distribution routes each container namespace's exact path
+  `Hosting`'s CloudFront door (on either tier), the distribution routes each
+  container namespace's exact path
   (`/aws-blocks/api/{name}`) straight to the load balancer's shared listener
   through one CloudFront VPC origin per backend (60 s read timeout), ahead of
   the `/aws-blocks/api/*` gateway behavior; the listener's path rule picks the
@@ -103,6 +104,13 @@ with readiness on port **8081** (503 while draining).
   URL instead.) The load balancer admits CloudFront's origin-facing prefix list
   on the listener range in one rule — the prefix list is looked up at deploy
   time (a custom resource) because its id differs per region.
+- **WAF.** On the `cloudfront` tier the API's web ACL (`apiWaf`) sits on the
+  distribution, so it covers the direct routes. On the `apigateway` tier it sits
+  on the gateway stage, so when `Hosting`'s CloudFront routes to the load
+  balancer directly, the same web ACL is associated with the load balancer too.
+  Every request reaches the load balancer from CloudFront or the VPC link, so
+  both carry the `apiWaf` front-door marker (an origin custom header; a VPC link
+  request parameter), which a Blocks-managed web ACL's per-IP rate rule exempts.
 - **Limits.** Through the gateway, API calls keep its ~29-second integration
   timeout; through a CloudFront VPC origin, up to 60 seconds.
 

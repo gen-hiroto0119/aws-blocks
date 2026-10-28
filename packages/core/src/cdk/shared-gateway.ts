@@ -75,6 +75,13 @@ export interface SharedGatewayProps {
 	 * endpoint type is an in-place update that keeps the `execute-api` hostname.
 	 */
 	readonly regionalEndpoint?: boolean;
+	/**
+	 * Headers each VPC link integration adds to every request it forwards to a
+	 * load-balanced compute: the `apiWaf` front-door marker, so a web ACL that is
+	 * also on the load balancer exempts the gateway's requests (all from the VPC
+	 * link's addresses) from its per-IP rate rule.
+	 */
+	readonly loadBalancerRequestHeaders?: Readonly<Record<string, string>>;
 }
 
 /** What {@link createSharedGateway} returns. @internal */
@@ -245,6 +252,7 @@ export function createSharedGateway(scope: Construct, props: SharedGatewayProps)
 					ingress,
 					path,
 					cdk.Duration.seconds(API_GATEWAY_INTEGRATION_TIMEOUT_SECONDS),
+					props.loadBalancerRequestHeaders,
 				);
 				directRoutes.push({ path, ingress });
 			}

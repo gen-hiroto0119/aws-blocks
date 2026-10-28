@@ -39,10 +39,11 @@ import { HttpOrigin } from 'aws-cdk-lib/aws-cloudfront-origins';
 import type { Construct, IConstruct } from 'constructs';
 import type { ApiFrontDoorTier } from '../common/index.js';
 import { BLOCKS_RPC_PREFIX } from '../constants.js';
-import { type ApiDirectRoute, addDirectApiBehaviors } from './api-direct-routes.js';
+import { type ApiDirectRoute, addDirectApiBehaviors, directlyRoutedLoadBalancers } from './api-direct-routes.js';
 import {
 	API_FRONT_DOOR_MARKER_HEADER,
 	apiFrontDoorMarkerValue,
+	attachApiWafToLoadBalancers,
 	attachApiWafToStage,
 	type ResolvedApiWaf,
 	warnApiWafDeferredToHosting,
@@ -140,9 +141,23 @@ export function httpOriginFromEndpoint(gatewayUrl: string, customHeaders?: Recor
  * @internal Framework-only; `Hosting` calls it (via `BlocksStackApi.apiFrontDoorMarker`).
  */
 export function apiFrontDoorMarker(owner: Construct & ApiFrontDoorOwner): Record<string, string> | undefined {
+	const marker = apiWafMarker(owner);
+	if (marker) owner._apiFrontDoorMarked = true;
+	return marker;
+}
+
+/**
+ * The `apiWaf` marker header itself (see {@link apiFrontDoorMarker}), without
+ * recording a claiming distribution: what the gateway's VPC link integrations
+ * add, so their requests are exempt from the rate rule when the web ACL is also
+ * on a container load balancer. `undefined` unless the backend has a
+ * Blocks-managed web ACL.
+ *
+ * @internal
+ */
+export function apiWafMarker(owner: Construct & ApiFrontDoorOwner): Record<string, string> | undefined {
 	const waf = owner._apiWaf;
 	if (!waf || !('rateLimit' in waf)) return undefined;
-	owner._apiFrontDoorMarked = true;
 	return { [API_FRONT_DOOR_MARKER_HEADER]: apiFrontDoorMarkerValue(owner) };
 }
 
@@ -269,7 +284,15 @@ class ApiFrontDoorAspect implements cdk.IAspect {
 					: owner._apiFrontDoorClaimedByHosting || owner._publicOriginPublishedByHosting
 						? 'proxied'
 						: 'direct';
-				attachApiWafToStage(owner, this.gatewayStage, waf, traffic);
+				const webAclArn = attachApiWafToStage(owner, this.gatewayStage, waf, traffic);
+				// A `Hosting` CloudFront door routes container namespaces straight to their
+				// load balancer, past the stage: the same web ACL guards it.
+				attachApiWafToLoadBalancers(
+					owner,
+					directlyRoutedLoadBalancers(owner._apiDirectRoutes ?? []),
+					waf,
+					webAclArn,
+				);
 			}
 			return;
 		}

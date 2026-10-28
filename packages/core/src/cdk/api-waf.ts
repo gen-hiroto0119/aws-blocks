@@ -20,6 +20,7 @@
 
 import * as cdk from 'aws-cdk-lib';
 import type { Stage } from 'aws-cdk-lib/aws-apigateway';
+import type { IApplicationLoadBalancer } from 'aws-cdk-lib/aws-elasticloadbalancingv2';
 import { CfnWebACL, CfnWebACLAssociation } from 'aws-cdk-lib/aws-wafv2';
 import type { Construct } from 'constructs';
 import type { ApiWafOptions } from '../common/index.js';
@@ -121,6 +122,9 @@ export type StageWafTraffic = 'direct' | 'marked' | 'proxied';
 
 /** Synth-warning id emitted when `apiWaf` leaves the rate rule off the stage ACL. */
 export const API_WAF_NO_RATE_LIMIT_WARNING = 'blocks:api-waf:no-rate-limit-behind-door';
+
+/** Synth-warning id emitted when a caller-supplied web ACL is also associated with a container load balancer. */
+export const API_WAF_LOAD_BALANCER_WARNING = 'blocks:api-waf:load-balancer-shared-sources';
 
 /**
  * Common rule set rules that inspect the request BODY and would reject normal
@@ -244,6 +248,7 @@ function assertWebAclArnScope(owner: Construct, webAclArn: string, scope: 'REGIO
  * `Hosting` door also forwards browser traffic to the stage (see
  * {@link StageWafTraffic}); a caller-supplied web ACL is attached as-is.
  *
+ * @returns the attached web ACL's ARN.
  * @internal
  */
 export function attachApiWafToStage(
@@ -251,7 +256,7 @@ export function attachApiWafToStage(
 	stage: Stage,
 	waf: ResolvedApiWaf,
 	traffic: StageWafTraffic = 'direct',
-): void {
+): string {
 	let webAclArn: string;
 	if ('webAclArn' in waf) {
 		assertWebAclArnScope(owner, waf.webAclArn, 'REGIONAL');
@@ -268,6 +273,43 @@ export function attachApiWafToStage(
 		}
 	}
 	new CfnWebACLAssociation(owner, `${WEB_ACL_ID}Association`, { resourceArn: stage.stageArn, webAclArn });
+	return webAclArn;
+}
+
+/**
+ * `apigateway` tier: associate the stage's web ACL (`webAclArn`) with each
+ * container load balancer a `Hosting` CloudFront distribution routes API
+ * namespaces to directly, so the requests that skip the stage are inspected too.
+ *
+ * Every request reaches such a load balancer from CloudFront (a VPC origin) or
+ * the gateway's VPC link, so a per-IP rate rule would count all users behind
+ * those addresses as one client. Both paths therefore carry the front-door
+ * marker, which a Blocks-managed ACL's rate rule exempts; its managed rule groups
+ * still inspect every request. A caller-supplied ACL is attached as-is, with a
+ * warning about its rate rules.
+ *
+ * @internal
+ */
+export function attachApiWafToLoadBalancers(
+	owner: Construct,
+	loadBalancers: readonly IApplicationLoadBalancer[],
+	waf: ResolvedApiWaf,
+	webAclArn: string,
+): void {
+	for (const loadBalancer of loadBalancers) {
+		new CfnWebACLAssociation(owner, `${WEB_ACL_ID}Association${loadBalancer.node.id}`, {
+			resourceArn: loadBalancer.loadBalancerArn,
+			webAclArn,
+		});
+	}
+	if (loadBalancers.length > 0 && 'webAclArn' in waf) {
+		cdk.Annotations.of(owner).addWarningV2(
+			API_WAF_LOAD_BALANCER_WARNING,
+			"apiWaf.webAclArn is also associated with the container load balancer that Hosting's CloudFront routes API " +
+				"namespaces to directly. Requests reach it from CloudFront and the API gateway's VPC link, so an IP-based " +
+				'rate rule in this web ACL counts every user behind those addresses as one client.',
+		);
+	}
 }
 
 /**

@@ -1473,7 +1473,8 @@ export class Hosting extends Construct {
     // `originPath` (see httpOriginFromEndpoint).
     // When the backend has `apiWaf`, mark these requests so its rate rule doesn't
     // count every browser user behind one CloudFront edge as a single client.
-    const apiGatewayOrigin = httpOriginFromEndpoint(apiUrl, api.apiFrontDoorMarker?.());
+    const frontDoorMarker = api.apiFrontDoorMarker?.();
+    const apiGatewayOrigin = httpOriginFromEndpoint(apiUrl, frontDoorMarker);
 
     // Attach the same security-headers / CSP policy the distribution's static,
     // SSR and image behaviors carry. Without it the API and auth responses go
@@ -1487,8 +1488,9 @@ export class Hosting extends Construct {
 
     // A namespace on a container compute skips the gateway: its exact path goes
     // straight to the container's load balancer. Added before `/aws-blocks/api/*`,
-    // which would otherwise match first.
-    addDirectApiBehaviors(distribution, api._apiDirectRoutes ?? [], apiBehaviorOptions);
+    // which would otherwise match first. Its requests carry the same marker, for
+    // the web ACL the backend also puts on that load balancer.
+    addDirectApiBehaviors(distribution, api._apiDirectRoutes ?? [], apiBehaviorOptions, frontDoorMarker);
 
     distribution.addBehavior(BLOCKS_RPC_PREFIX, apiGatewayOrigin, apiBehaviorOptions);
     distribution.addBehavior(`${BLOCKS_RPC_PREFIX}/*`, apiGatewayOrigin, apiBehaviorOptions);
