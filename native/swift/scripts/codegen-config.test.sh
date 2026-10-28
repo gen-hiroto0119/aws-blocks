@@ -143,6 +143,96 @@ else
   echo "ok passing the sidecar itself warns about nothing"
 fi
 
+# Every plugin passes [spec, output] + [config], so the configuration's name in argument 2 is
+# a hand invocation with the last two in the wrong order.
+MIS="$WORK/misplaced"
+mkdir -p "$MIS"
+cp "$WORK/blocks.spec.json" "$MIS/blocks.spec.json"
+printf '%s' '{"optOutNativePackages":[]}' > "$MIS/blocks.codegen.json"
+MISPLACED="Error: blocks.codegen.json was passed as argument 2, the output directory; the output directory comes second and the configuration third"
+
+misplaced_check() {
+  local name="$1" dir="$2" out stale got_exit=0
+  shift 2
+  out="$(cd "$dir" && "$TOOL" "$@" 2>&1)" || got_exit=$?
+  if [[ "$got_exit" != 1 ]]; then
+    echo "FAIL $name: exit $got_exit, want 1" >&2; echo "$out" >&2; FAILED=1; return
+  fi
+  if ! grep -qF -- "$MISPLACED" <<<"$out"; then
+    echo "FAIL $name: expected '$MISPLACED'" >&2; echo "$out" >&2; FAILED=1; return
+  fi
+  # Each of these described the caller's situation wrongly before the slot was reported.
+  for stale in "is present but ignored" "Cannot read" "exists but was not passed"; do
+    if grep -qF -- "$stale" <<<"$out"; then
+      echo "FAIL $name: still printed '$stale'" >&2; echo "$out" >&2; FAILED=1; return
+    fi
+  done
+  echo "ok $name"
+}
+
+# Nothing creates `missingout`: this is the shape a first run with the arguments swapped takes.
+misplaced_check "a misplaced configuration is named when the path after it does not exist" \
+  "$MIS" blocks.spec.json blocks.codegen.json missingout
+mkdir -p "$MIS/existingout"
+misplaced_check "a misplaced configuration is named when the path after it exists" \
+  "$MIS" blocks.spec.json blocks.codegen.json existingout
+misplaced_check "a misplaced configuration is named when nothing follows it" \
+  "$MIS" blocks.spec.json blocks.codegen.json
+
+# Neither path exists and the spec has no sidecar: the name in argument 2 is enough on its own.
+NOSIDE="$WORK/noside"
+mkdir -p "$NOSIDE"
+cp "$WORK/blocks.spec.json" "$NOSIDE/blocks.spec.json"
+misplaced_check "a misplaced configuration is named when neither path exists" \
+  "$NOSIDE" blocks.spec.json nested/blocks.codegen.json out
+
+# Resolving argument 2 would follow this to its target's name, which is not what was typed.
+SYM="$WORK/symlinked"
+mkdir -p "$SYM"
+cp "$WORK/blocks.spec.json" "$SYM/blocks.spec.json"
+printf '%s' '{"optOutNativePackages":[]}' > "$SYM/real-config.json"
+ln -s real-config.json "$SYM/blocks.codegen.json"
+misplaced_check "a symlink spelling the configuration's name is named too" \
+  "$SYM" blocks.spec.json blocks.codegen.json symout
+
+# Without a sidecar this shape generated into a directory of that name and exited 0, so this
+# is the one exit status the diagnostic changes.
+EXITCHG="$WORK/exitchange"
+mkdir -p "$EXITCHG"
+cp "$WORK/blocks.spec.json" "$EXITCHG/blocks.spec.json"
+misplaced_check "a sidecar-free misplaced configuration is refused rather than generated into" \
+  "$EXITCHG" blocks.spec.json blocks.codegen.json
+if [[ -e "$EXITCHG/blocks.codegen.json" ]]; then
+  echo "FAIL sidecar-free misplaced configuration: a directory of that name was created" >&2; FAILED=1
+else
+  echo "ok no directory is created for the misplaced configuration"
+fi
+
+# Resolving argument 2 would name the current directory, which argument 2 never spelled.
+CWDNAME="$WORK/cwdname/blocks.codegen.json"
+mkdir -p "$CWDNAME"
+cp "$WORK/blocks.spec.json" "$CWDNAME/blocks.spec.json"
+for ARG2 in "" "."; do
+  rm -f "$CWDNAME/Models.swift" "$CWDNAME/API.swift"
+  CWD_RC=0
+  CWD_OUT="$(cd "$CWDNAME" && "$TOOL" blocks.spec.json ${ARG2:+"$ARG2"} 2>&1)" || CWD_RC=$?
+  if [[ $CWD_RC == 0 ]] && [[ -f "$CWDNAME/API.swift" ]] && ! grep -qF -- "$MISPLACED" <<<"$CWD_OUT"; then
+    echo "ok a current directory of that name is not read as a misplaced configuration${ARG2:+, named explicitly}"
+  else
+    echo "FAIL current directory as output (argument 2 '$ARG2'): exit $CWD_RC" >&2
+    echo "$CWD_OUT" | tail -3 >&2; FAILED=1
+  fi
+done
+
+rm -rf "$MIS/out"
+CTRL_RC=0
+CTRL="$(cd "$MIS" && "$TOOL" blocks.spec.json out blocks.codegen.json 2>&1)" || CTRL_RC=$?
+if [[ $CTRL_RC == 0 ]] && [[ -f "$MIS/out/API.swift" ]] && ! grep -qF -- "$MISPLACED" <<<"$CTRL"; then
+  echo "ok the documented argument order is unaffected"
+else
+  echo "FAIL documented order: exit $CTRL_RC" >&2; echo "$CTRL" | tail -3 >&2; FAILED=1
+fi
+
 EXPECTED_CODES="AWSBLOCKS-NATIVE-001 AWSBLOCKS-NATIVE-003 AWSBLOCKS-NATIVE-004 AWSBLOCKS-NATIVE-005 AWSBLOCKS-NATIVE-006"
 ACTUAL_CODES="$(grep -rhoE "AWSBLOCKS-NATIVE-[0-9]+" \
   "$PKG_DIR/Sources" "$PKG_DIR/Plugins" "$PKG_DIR/.changeset" | sort -u | tr '\n' ' ')" || true

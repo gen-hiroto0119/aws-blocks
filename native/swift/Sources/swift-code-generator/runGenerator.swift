@@ -29,6 +29,18 @@ func resolvedPath(_ path: String) -> URL {
     URL(fileURLWithPath: path).resolvingSymlinksInPath().standardizedFileURL
 }
 
+/// Matches what argument 2 spells: the path passed third does not exist on a first run, and
+/// resolving argument 2 would name the current directory when it is `.` or absent.
+func reportMisplacedConfig(outputDir: String) {
+    guard (outputDir as NSString).lastPathComponent == blocksCodegenConfigName else { return }
+    fputs(
+        "Error: \(blocksCodegenConfigName) was passed as argument 2, the output directory; "
+            + "the output directory comes second and the configuration third\n",
+        stderr
+    )
+    exit(1)
+}
+
 /// A sidecar beside the spec is never read here — the plugins pass the path — so an
 /// unpassed one is refused and an overridden one is named, rather than ignored.
 func reportSiblingConfig(specPath: String, configPath: String?) {
@@ -85,6 +97,7 @@ struct BlocksCodegenTool {
         let specPath = CommandLine.arguments[1]
         let outputDir = CommandLine.arguments.count > 2 ? CommandLine.arguments[2] : "."
         let configPath = CommandLine.arguments.count > 3 ? CommandLine.arguments[3] : nil
+        reportMisplacedConfig(outputDir: outputDir)
         reportSiblingConfig(specPath: specPath, configPath: configPath)
 
         guard let specData = FileManager.default.contents(atPath: specPath) else {
