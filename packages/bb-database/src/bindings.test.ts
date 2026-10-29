@@ -19,17 +19,17 @@ describe('bindings', () => {
 	test('diffBindings reports only blocks whose cluster id or type changed', () => {
 		const deployed: Bindings = {
 			databases: {
-				'app-orders': { cluster: 'default', type: 'distributed', resource: 'ordersDsql' },
-				'app-gone': { cluster: 'default', type: 'distributed', resource: 'goneDsql' },
+				'app-orders': { cluster: 'default', type: 'dsql', resource: 'ordersDsql' },
+				'app-gone': { cluster: 'default', type: 'dsql', resource: 'goneDsql' },
 			},
 			clusters: {},
 		};
 		const next: Bindings = {
 			databases: {
-				'app-orders': { cluster: 'app-main', type: 'distributed' },
-				'app-new': { cluster: 'default', type: 'distributed', resource: 'newDsql' },
+				'app-orders': { cluster: 'app-main', type: 'dsql' },
+				'app-new': { cluster: 'default', type: 'dsql', resource: 'newDsql' },
 			},
-			clusters: { 'app-main': { type: 'distributed', resource: 'mainDsql' } },
+			clusters: { 'app-main': { type: 'dsql', resource: 'mainDsql' } },
 		};
 		const changes = diffBindings(deployed, next);
 		assert.strictEqual(changes.length, 1);
@@ -37,7 +37,7 @@ describe('bindings', () => {
 		assert.deepStrictEqual(diffBindings(undefined, next), [], 'first deploy has nothing to compare');
 		// A changed logical id alone is not a binding change: the diff compares cluster and type.
 		const renamedResource: Bindings = {
-			databases: { 'app-orders': { cluster: 'default', type: 'distributed', resource: 'other' } },
+			databases: { 'app-orders': { cluster: 'default', type: 'dsql', resource: 'other' } },
 			clusters: {},
 		};
 		assert.deepStrictEqual(
@@ -52,21 +52,21 @@ describe('bindings', () => {
 	test('removedClusterResources lists the cluster resources whose owner left the record', () => {
 		const deployed: Bindings = {
 			databases: {
-				'app-orders': { cluster: 'default', type: 'distributed', resource: 'ordersDsql' },
-				'app-kept': { cluster: 'default', type: 'distributed', resource: 'keptDsql' },
-				'app-shared': { cluster: 'app-main', type: 'distributed' },
+				'app-orders': { cluster: 'default', type: 'dsql', resource: 'ordersDsql' },
+				'app-kept': { cluster: 'default', type: 'dsql', resource: 'keptDsql' },
+				'app-shared': { cluster: 'app-main', type: 'dsql' },
 			},
 			clusters: {
-				'app-main': { type: 'distributed', resource: 'mainDsql' },
-				'app-old': { type: 'distributed', resource: 'oldDsql' },
+				'app-main': { type: 'dsql', resource: 'mainDsql' },
+				'app-old': { type: 'dsql', resource: 'oldDsql' },
 			},
 		};
 		const next: Bindings = {
 			databases: {
-				'app-kept': { cluster: 'default', type: 'distributed', resource: 'keptDsql' },
-				'app-shared': { cluster: 'app-main', type: 'distributed' },
+				'app-kept': { cluster: 'default', type: 'dsql', resource: 'keptDsql' },
+				'app-shared': { cluster: 'app-main', type: 'dsql' },
 			},
-			clusters: { 'app-main': { type: 'distributed', resource: 'mainDsql' } },
+			clusters: { 'app-main': { type: 'dsql', resource: 'mainDsql' } },
 		};
 		assert.deepStrictEqual([...removedClusterResources(deployed, next)].sort(), ['oldDsql', 'ordersDsql']);
 		assert.deepStrictEqual([...removedClusterResources(undefined, next)], []);
@@ -76,14 +76,14 @@ describe('bindings', () => {
 		const message = formatBindingStop(
 			{
 				fullId: 'app-orders',
-				from: { cluster: 'default', type: 'distributed' },
-				to: { cluster: 'app-main', type: 'distributed' },
+				from: { cluster: 'default', type: 'dsql' },
+				to: { cluster: 'app-main', type: 'dsql' },
 			},
 			{ shortId: 'orders', removalPolicy: 'retain' },
 		);
 		assert.strictEqual(
 			message,
-			"Deploy stopped: Database 'app-orders' is bound to its default cluster (distributed) and cannot move to 'app-main' (distributed).\n" +
+			"Deploy stopped: Database 'app-orders' is bound to its default cluster (dsql) and cannot move to 'app-main' (dsql).\n" +
 				"A Database keeps its cluster for life. To change clusters: add a new Database on 'app-main', copy the data, switch your handlers, then remove 'orders'.\n" +
 				'Data on the default cluster is retained (removal policy: retain).',
 		);
@@ -92,12 +92,12 @@ describe('bindings', () => {
 	test('enforceLocalBinding writes the marker once and stops on a change', () => {
 		const dir = mkdtempSync(join(tmpdir(), 'bb-database-binding-'));
 		try {
-			enforceLocalBinding(dir, 'app-db', 'db', { cluster: 'default', type: 'distributed' });
-			assert.deepStrictEqual(readBindingMarker(dir), { cluster: 'default', type: 'distributed' });
-			enforceLocalBinding(dir, 'app-db', 'db', { cluster: 'default', type: 'distributed' });
+			enforceLocalBinding(dir, 'app-db', 'db', { cluster: 'default', type: 'dsql' });
+			assert.deepStrictEqual(readBindingMarker(dir), { cluster: 'default', type: 'dsql' });
+			enforceLocalBinding(dir, 'app-db', 'db', { cluster: 'default', type: 'dsql' });
 			assert.throws(
-				() => enforceLocalBinding(dir, 'app-db', 'db', { cluster: 'app-main', type: 'distributed' }),
-				/Deploy stopped: Database 'app-db' is bound to its default cluster \(distributed\)[\s\S]*delete \.bb-data\/app-db/,
+				() => enforceLocalBinding(dir, 'app-db', 'db', { cluster: 'app-main', type: 'dsql' }),
+				/Deploy stopped: Database 'app-db' is bound to its default cluster \(dsql\)[\s\S]*delete \.bb-data\/app-db/,
 			);
 		} finally {
 			rmSync(dir, { recursive: true, force: true });

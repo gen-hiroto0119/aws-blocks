@@ -27,43 +27,43 @@ describe('deploy guard: binding record', () => {
 	test('a block moving from its owned cluster to a shared one is a stop, with the deployed removal policy', () => {
 		const deployed = templateWith(
 			{
-				databases: { 'app-orders': { cluster: 'default', type: 'distributed', resource: 'OrdersDsql' } },
+				databases: { 'app-orders': { cluster: 'default', type: 'dsql', resource: 'OrdersDsql' } },
 				clusters: {},
 			},
 			{ OrdersDsql: dsql('Retain') },
 		);
 		const next = templateWith({
-			databases: { 'app-orders': { cluster: 'app-main', type: 'distributed' } },
-			clusters: { 'app-main': { type: 'distributed', resource: 'MainDsql' } },
+			databases: { 'app-orders': { cluster: 'app-main', type: 'dsql' } },
+			clusters: { 'app-main': { type: 'dsql', resource: 'MainDsql' } },
 		});
 		const stops = bindingStops(deployed, next);
 		assert.strictEqual(stops.length, 1);
-		assert.match(stops[0], /Deploy stopped: Database 'app-orders' is bound to its default cluster \(distributed\)/);
-		assert.match(stops[0], /cannot move to 'app-main' \(distributed\)/);
+		assert.match(stops[0], /Deploy stopped: Database 'app-orders' is bound to its default cluster \(dsql\)/);
+		assert.match(stops[0], /cannot move to 'app-main' \(dsql\)/);
 		assert.match(stops[0], /removal policy: retain/);
 	});
 
 	test('a block moving between two shared clusters is a stop', () => {
 		const deployed = templateWith({
-			databases: { 'app-orders': { cluster: 'app-a', type: 'distributed' } },
+			databases: { 'app-orders': { cluster: 'app-a', type: 'dsql' } },
 			clusters: {
-				'app-a': { type: 'distributed', resource: 'A' },
-				'app-b': { type: 'distributed', resource: 'B' },
+				'app-a': { type: 'dsql', resource: 'A' },
+				'app-b': { type: 'dsql', resource: 'B' },
 			},
 		});
 		const next = templateWith({
-			databases: { 'app-orders': { cluster: 'app-b', type: 'distributed' } },
+			databases: { 'app-orders': { cluster: 'app-b', type: 'dsql' } },
 			clusters: {
-				'app-a': { type: 'distributed', resource: 'A' },
-				'app-b': { type: 'distributed', resource: 'B' },
+				'app-a': { type: 'dsql', resource: 'A' },
+				'app-b': { type: 'dsql', resource: 'B' },
 			},
 		});
-		assert.match(bindingStops(deployed, next)[0], /is bound to 'app-a' \(distributed\) and cannot move to 'app-b'/);
+		assert.match(bindingStops(deployed, next)[0], /is bound to 'app-a' \(dsql\) and cannot move to 'app-b'/);
 	});
 
 	test('a first deploy, an unchanged record, and a deleted block pass', () => {
 		const next = templateWith({
-			databases: { 'app-db': { cluster: 'default', type: 'distributed', resource: 'DbDsql' } },
+			databases: { 'app-db': { cluster: 'default', type: 'dsql', resource: 'DbDsql' } },
 			clusters: {},
 		});
 		assert.deepStrictEqual(bindingStops(undefined, next), []);
@@ -75,10 +75,10 @@ describe('deploy guard: binding record', () => {
 describe('deploy guard: change-set backstop', () => {
 	const deployedBindings = {
 		databases: {
-			'app-orders': { cluster: 'default', type: 'distributed', resource: 'OrdersDsql' },
-			'app-shared': { cluster: 'app-main', type: 'distributed' },
+			'app-orders': { cluster: 'default', type: 'dsql', resource: 'OrdersDsql' },
+			'app-shared': { cluster: 'app-main', type: 'dsql' },
 		},
-		clusters: { 'app-main': { type: 'distributed', resource: 'MainDsql' } },
+		clusters: { 'app-main': { type: 'dsql', resource: 'MainDsql' } },
 	};
 
 	test('deleting a block that owns a retained cluster passes, with a note', () => {
@@ -110,7 +110,7 @@ describe('deploy guard: change-set backstop', () => {
 			...deployedBindings,
 			databases: {
 				...deployedBindings.databases,
-				'app-orders': { cluster: 'default', type: 'distributed', resource: 'OrdersDsqlRenamed' },
+				'app-orders': { cluster: 'default', type: 'dsql', resource: 'OrdersDsqlRenamed' },
 			},
 		});
 		const result = changeSetStops([remove('OrdersDsql')], next, deployed);
@@ -215,7 +215,7 @@ function fakeClients(deployedTemplate: unknown, changes: unknown[]) {
 
 describe('deploy guard: guardDeploy', () => {
 	const deployed = templateWith(
-		{ databases: { 'app-db': { cluster: 'default', type: 'distributed', resource: 'DbDsql' } }, clusters: {} },
+		{ databases: { 'app-db': { cluster: 'default', type: 'dsql', resource: 'DbDsql' } }, clusters: {} },
 		{ DbDsql: dsql('Retain') },
 	);
 
@@ -259,8 +259,8 @@ describe('deploy guard: guardDeploy', () => {
 
 	test('a binding stop is reported without creating a change set', async () => {
 		const next = templateWith({
-			databases: { 'app-db': { cluster: 'app-main', type: 'distributed' } },
-			clusters: { 'app-main': { type: 'distributed', resource: 'MainDsql' } },
+			databases: { 'app-db': { cluster: 'app-main', type: 'dsql' } },
+			clusters: { 'app-main': { type: 'dsql', resource: 'MainDsql' } },
 		});
 		const { cloudFormation, s3, sent } = fakeClients(deployed, []);
 		const result = await guardDeploy({ stackName: 'App', template: next, cloudFormation, s3 });

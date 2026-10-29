@@ -6,7 +6,7 @@ import { describe, test } from 'node:test';
 import { BINDINGS_METADATA_KEY } from './constants.js';
 import { predeploy } from './predeploy.js';
 
-const bindings = (databases: Record<string, { cluster: string; type: 'distributed' }>) => ({
+const bindings = (databases: Record<string, { cluster: string; type: 'dsql' }>) => ({
 	Metadata: { [BINDINGS_METADATA_KEY]: { databases, clusters: {} } },
 	Resources: {},
 });
@@ -42,8 +42,8 @@ describe('predeploy hook', () => {
 	});
 
 	test('production: guards every synthesized stack and returns the stops', async () => {
-		const deployed = bindings({ 'app-db': { cluster: 'default', type: 'distributed' } });
-		const next = bindings({ 'app-db': { cluster: 'app-shared', type: 'distributed' } });
+		const deployed = bindings({ 'app-db': { cluster: 'default', type: 'dsql' } });
+		const next = bindings({ 'app-db': { cluster: 'app-shared', type: 'dsql' } });
 		const result = await predeploy(
 			{ stage: 'production', projectRoot: '/app', synth: async () => [{ stackName: 'App', template: next }] },
 			{ cloudFormation: deployedClient(deployed) },
